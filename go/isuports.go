@@ -424,8 +424,13 @@ type PlayerScoreRow struct {
 var flocked = map[int64]bool{}
 
 func flockByTenantID(tenantID int64) (func(), error) {
-	if flocked[tenantID] {
-		return nil, fmt.Errorf("already locked: tenantID=%d", tenantID)
+	for {
+		// すでにロックされている場合は待つ
+		if _, ok := flocked[tenantID]; ok {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		break
 	}
 	flocked[tenantID] = true
 	return func() {
@@ -1050,6 +1055,7 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl()
+
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1245,6 +1251,7 @@ func playerHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl()
+
 	pss := make([]PlayerScoreRow, 0, len(cs))
 	for _, c := range cs {
 		ps := PlayerScoreRow{}
@@ -1373,6 +1380,7 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl()
+
 	pss := []PlayerScoreRow{}
 	if err := tenantDB.SelectContext(
 		ctx,
