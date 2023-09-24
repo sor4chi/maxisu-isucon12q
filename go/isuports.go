@@ -51,7 +51,7 @@ var (
 
 	sqliteDriverName = "sqlite3"
 
-	playerCache       *ttlcache.Cache[string, PlayerRow]
+	playerCache      *ttlcache.Cache[string, PlayerRow]
 	competitionCache *ttlcache.Cache[string, CompetitionRow]
 )
 
@@ -1365,16 +1365,15 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error Select tenant: id=%d, %w", v.tenantID, err)
 	}
 
-	if _, err := adminDB.ExecContext(
-		ctx,
-		"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-		v.playerID, tenant.ID, competitionID, now, now,
-	); err != nil {
-		return fmt.Errorf(
-			"error Insert visit_history: playerID=%s, tenantID=%d, competitionID=%s, createdAt=%d, updatedAt=%d, %w",
-			v.playerID, tenant.ID, competitionID, now, now, err,
-		)
-	}
+	go func() {
+		if _, err := adminDB.ExecContext(
+			ctx,
+			"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+			v.playerID, tenant.ID, competitionID, now, now,
+		); err != nil {
+			log.Printf("error Insert visit_history: playerID=%s, tenantID=%d, competitionID=%s, %s", v.playerID, tenant.ID, competitionID, err)
+		}
+	}()
 
 	var rankAfter int64
 	rankAfterStr := c.QueryParam("rank_after")
