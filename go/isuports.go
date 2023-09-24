@@ -50,7 +50,7 @@ var (
 	adminDB *sqlx.DB
 
 	sqliteDriverName      = "sqlite3"
-	organizerBillingCache *ttlcache.Cache[string, *SuccessResult]
+	organizerBillingCache *ttlcache.Cache[string, SuccessResult]
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -135,8 +135,8 @@ func Run() {
 	defer sqlLogger.Close()
 
 	// キャッシュの初期化
-	organizerBillingCache = ttlcache.New[string, *SuccessResult](
-		ttlcache.WithTTL[string, *SuccessResult](3 * time.Second),
+	organizerBillingCache = ttlcache.New[string, SuccessResult](
+		ttlcache.WithTTL[string, SuccessResult](3 * time.Second),
 	)
 
 	// e.Use(middleware.Logger())
@@ -1210,7 +1210,8 @@ func billingHandler(c echo.Context) error {
 
 	key := fmt.Sprintf("organizer_billing_%d", v.tenantID)
 
-	if item := organizerBillingCache.Get(key); item.Value() != nil {
+	if ok := organizerBillingCache.Has(key); ok {
+		item := organizerBillingCache.Get(key)
 		return c.JSON(http.StatusOK, item.Value())
 	}
 
@@ -1247,7 +1248,7 @@ func billingHandler(c echo.Context) error {
 		},
 	}
 
-	organizerBillingCache.Set(key, &res, ttlcache.DefaultTTL)
+	organizerBillingCache.Set(key, res, ttlcache.DefaultTTL)
 
 	return c.JSON(http.StatusOK, res)
 }
