@@ -1,4 +1,9 @@
 matching_groups:
+  - /api/organizer/competition/.+/score
+  - /api/organizer/competition/.+/finish
+  - /api/organizer/player/.+/disqualified
+  - /api/player/competition/.+/ranking
+  - /api/player/player/.+
 sort: avg
 reverse: true
 metrics:
