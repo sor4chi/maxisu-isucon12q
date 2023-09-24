@@ -27,6 +27,8 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+
+	"github.com/pkg/profile"
 )
 
 const (
@@ -133,6 +135,8 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
+	profile := profile.Start(profile.ProfilePath("/home/isucon/webapp/go"))
+
 	e := echo.New()
 	e.Debug = false
 	e.Logger.SetLevel(log.INFO)
@@ -181,6 +185,11 @@ func Run() {
 
 	// ベンチマーカー向けAPI
 	e.POST("/initialize", initializeHandler)
+
+	e.GET("/stop", func(c echo.Context) error {
+		profile.Stop()
+		return c.String(http.StatusOK, "stopped profile")
+	})
 
 	e.HTTPErrorHandler = errorResponseHandler
 
