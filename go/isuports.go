@@ -51,7 +51,8 @@ var (
 
 	sqliteDriverName = "sqlite3"
 
-	playerCache *ttlcache.Cache[string, PlayerRow]
+	playerCache       *ttlcache.Cache[string, PlayerRow]
+	competitionCache *ttlcache.Cache[string, CompetitionRow]
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -137,6 +138,9 @@ func Run() {
 
 	playerCache = ttlcache.New[string, PlayerRow](
 		ttlcache.WithTTL[string, PlayerRow](60 * time.Second),
+	)
+	competitionCache = ttlcache.New[string, CompetitionRow](
+		ttlcache.WithTTL[string, CompetitionRow](60 * time.Second),
 	)
 
 	// e.Use(middleware.Logger())
@@ -396,10 +400,15 @@ type CompetitionRow struct {
 
 // 大会を取得する
 func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, id string) (*CompetitionRow, error) {
+	if ok := competitionCache.Has(id); ok {
+		item := competitionCache.Get(id).Value()
+		return &item, nil
+	}
 	var c CompetitionRow
 	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select competition: id=%s, %w", id, err)
 	}
+	competitionCache.Set(id, c, ttlcache.DefaultTTL)
 	return &c, nil
 }
 
@@ -1022,6 +1031,7 @@ func competitionFinishHandler(c echo.Context) error {
 			now, now, id, err,
 		)
 	}
+	competitionCache.Delete(id)
 	return c.JSON(http.StatusOK, SuccessResult{Status: true})
 }
 
