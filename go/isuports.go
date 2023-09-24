@@ -28,6 +28,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/rs/xid"
 )
 
@@ -48,7 +49,8 @@ var (
 
 	adminDB *sqlx.DB
 
-	sqliteDriverName = "sqlite3"
+	sqliteDriverName      = "sqlite3"
+	organizerBillingCache *ttlcache.Cache[string, *SuccessResult]
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -131,6 +133,11 @@ func Run() {
 		e.Logger.Panicf("error initializeSQLLogger: %s", err)
 	}
 	defer sqlLogger.Close()
+
+	// キャッシュの初期化
+	organizerBillingCache = ttlcache.New[string, *SuccessResult](
+		ttlcache.WithTTL[string, *SuccessResult](3 * time.Second),
+	)
 
 	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -1201,6 +1208,12 @@ func billingHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "role organizer required")
 	}
 
+	key := fmt.Sprintf("organizer_billing_%d", v.tenantID)
+
+	if item := organizerBillingCache.Get(key); item.Value() != nil {
+		return c.JSON(http.StatusOK, item.Value())
+	}
+
 	tenantDB, err := connectToTenantDB(v.tenantID)
 	if err != nil {
 		return err
@@ -1233,6 +1246,9 @@ func billingHandler(c echo.Context) error {
 			Reports: tbrs,
 		},
 	}
+
+	organizerBillingCache.Set(key, &res, ttlcache.DefaultTTL)
+
 	return c.JSON(http.StatusOK, res)
 }
 
