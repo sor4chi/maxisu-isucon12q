@@ -89,6 +89,12 @@ func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
 	}
+	if _, err := db.ExecContext(
+		context.Background(),
+		"CREATE INDEX IF NOT EXISTS player_score_tenant_id_competition_id_row_num ON player_score (tenant_id, competition_id, row_num DESC)",
+	); err != nil {
+		return nil, fmt.Errorf("failed to create index: %w", err)
+	}
 	return db, nil
 }
 
