@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -422,19 +423,24 @@ type PlayerScoreRow struct {
 
 // 排他ロックする
 var flocked = map[int64]bool{}
+var flockedMutex sync.Mutex
 
 func flockByTenantID(tenantID int64) (func(), error) {
 	for {
-		// すでにロックされている場合は待つ
-		if _, ok := flocked[tenantID]; ok {
+		flockedMutex.Lock()
+		if flocked[tenantID] {
+			flockedMutex.Unlock()
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 		break
 	}
 	flocked[tenantID] = true
+	flockedMutex.Unlock()
 	return func() {
-		delete(flocked, tenantID)
+		flockedMutex.Lock()
+		flocked[tenantID] = false
+		flockedMutex.Unlock()
 	}, nil
 }
 
