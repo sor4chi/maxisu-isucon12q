@@ -28,6 +28,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/rs/xid"
 )
 
@@ -50,7 +51,7 @@ var (
 
 	sqliteDriverName = "sqlite3"
 
-	playerCache map[string]PlayerRow
+	playerCache *ttlcache.Cache[string, PlayerRow]
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -134,7 +135,9 @@ func Run() {
 	}
 	defer sqlLogger.Close()
 
-	playerCache = map[string]PlayerRow{}
+	playerCache = ttlcache.New[string, PlayerRow](
+		ttlcache.WithTTL[string, PlayerRow](60 * time.Second),
+	)
 
 	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -354,14 +357,15 @@ type PlayerRow struct {
 
 // 参加者を取得する
 func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
-	if p, ok := playerCache[id]; ok {
-		return &p, nil
+	if ok := playerCache.Has(id); ok {
+		item := playerCache.Get(id).Value()
+		return &item, nil
 	}
 	var p PlayerRow
 	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
 	}
-	playerCache[id] = p
+	playerCache.Set(id, p, ttlcache.DefaultTTL)
 	return &p, nil
 }
 
@@ -900,7 +904,7 @@ func playerDisqualifiedHandler(c echo.Context) error {
 			true, now, playerID, err,
 		)
 	}
-	delete(playerCache, playerID)
+	playerCache.Delete(playerID)
 	p, err := retrievePlayer(ctx, tenantDB, playerID)
 	if err != nil {
 		// 存在しないプレイヤー
