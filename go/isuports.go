@@ -385,6 +385,23 @@ func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow
 	return &p, nil
 }
 
+// 参加者を一気に取得する
+func retrievePlayerBulk(ctx context.Context, tenantDB dbOrTx, ids []string) ([]PlayerRow, error) {
+	ps := []PlayerRow{}
+	query := "SELECT * FROM player WHERE id IN ("
+	for i := 0; i < len(ids); i++ {
+		query += "?"
+		if i < len(ids)-1 {
+			query += ","
+		}
+	}
+	query += ")"
+	if err := tenantDB.SelectContext(ctx, &ps, query); err != nil {
+		return nil, fmt.Errorf("error Select player: ids=%v, %w", ids, err)
+	}
+	return ps, nil
+}
+
 // 参加者を認可する
 // 参加者向けAPIで呼ばれる
 func authorizePlayer(ctx context.Context, tenantDB dbOrTx, id string) error {
@@ -1000,6 +1017,11 @@ type ScoreHandlerResult struct {
 	Rows int64 `json:"rows"`
 }
 
+type PlayerScore struct {
+	PlayerID string `json:"player_id"`
+	ScoreStr string `json:"score"`
+}
+
 // テナント管理者向けAPI
 // POST /api/organizer/competition/:competition_id/score
 // 大会のスコアをCSVでアップロードする
@@ -1066,6 +1088,7 @@ func competitionScoreHandler(c echo.Context) error {
 	defer fl.Close()
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
+	playerScores := []PlayerScore{}
 	for {
 		rowNum++
 		row, err := r.Read()
@@ -1079,21 +1102,40 @@ func competitionScoreHandler(c echo.Context) error {
 			return fmt.Errorf("row must have two columns: %#v", row)
 		}
 		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
-			// 存在しない参加者が含まれている
-			if errors.Is(err, sql.ErrNoRows) {
+		playerScores = append(playerScores, PlayerScore{
+			PlayerID: playerID,
+			ScoreStr: scoreStr,
+		})
+	}
+
+	playerIDs := make([]string, 0, len(playerScores))
+	for _, ps := range playerScores {
+		playerIDs = append(playerIDs, ps.PlayerID)
+	}
+
+	if players, err := retrievePlayerBulk(ctx, tenantDB, playerIDs); err != nil {
+		return fmt.Errorf("error retrievePlayers: %w", err)
+	} else {
+		playerMap := map[string]PlayerRow{}
+		for _, p := range players {
+			playerMap[p.ID] = p
+		}
+		for _, ps := range playerScores {
+			if _, ok := playerMap[ps.PlayerID]; !ok {
 				return echo.NewHTTPError(
 					http.StatusBadRequest,
-					fmt.Sprintf("player not found: %s", playerID),
+					fmt.Sprintf("player not found: %s", ps.PlayerID),
 				)
 			}
-			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
-		var score int64
-		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
+	}
+
+	for _, ps := range playerScores {
+		score, err := strconv.ParseInt(ps.ScoreStr, 10, 64)
+		if err != nil {
 			return echo.NewHTTPError(
 				http.StatusBadRequest,
-				fmt.Sprintf("error strconv.ParseUint: scoreStr=%s, %s", scoreStr, err),
+				fmt.Sprintf("error strconv.ParseUint: scoreStr=%s, %s", ps.ScoreStr, err),
 			)
 		}
 		id, err := dispenseID(ctx)
@@ -1104,7 +1146,7 @@ func competitionScoreHandler(c echo.Context) error {
 		playerScoreRows = append(playerScoreRows, PlayerScoreRow{
 			ID:            id,
 			TenantID:      v.tenantID,
-			PlayerID:      playerID,
+			PlayerID:      ps.PlayerID,
 			CompetitionID: competitionID,
 			Score:         score,
 			RowNum:        rowNum,
