@@ -44,14 +44,7 @@ mysql-conf-deploy-s2:
 	sudo systemctl restart mysql
 
 .PHONY: conf-deploy-s3
-conf-deploy-s3: nginx-conf-deploy-s3 mysql-conf-deploy-s3
-
-.PHONY: nginx-conf-deploy-s3
-nginx-conf-deploy-s3:
-	echo "nginx conf deploy"
-	sudo cp -r s3/etc/nginx/* /etc/nginx
-	sudo nginx -t
-	sudo systemctl restart nginx
+conf-deploy-s3: mysql-conf-deploy-s3
 
 .PHONY: mysql-conf-deploy-s3
 mysql-conf-deploy-s3:
