@@ -28,6 +28,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
 
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/rs/xid"
 )
 
@@ -49,6 +50,9 @@ var (
 	adminDB *sqlx.DB
 
 	sqliteDriverName = "sqlite3"
+
+	playerCache      *ttlcache.Cache[string, PlayerRow]
+	competitionCache *ttlcache.Cache[string, CompetitionRow]
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -84,6 +88,12 @@ func connectToTenantDB(id int64) (*sqlx.DB, error) {
 	db, err := sqlx.Open(sqliteDriverName, fmt.Sprintf("file:%s?mode=rw", p))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant DB: %w", err)
+	}
+	if _, err := db.ExecContext(
+		context.Background(),
+		"CREATE INDEX IF NOT EXISTS player_score_tenant_id_competition_id_row_num ON player_score (tenant_id, competition_id, row_num DESC)",
+	); err != nil {
+		return nil, fmt.Errorf("failed to create index: %w", err)
 	}
 	return db, nil
 }
@@ -131,6 +141,13 @@ func Run() {
 		e.Logger.Panicf("error initializeSQLLogger: %s", err)
 	}
 	defer sqlLogger.Close()
+
+	playerCache = ttlcache.New[string, PlayerRow](
+		ttlcache.WithTTL[string, PlayerRow](60 * time.Second),
+	)
+	competitionCache = ttlcache.New[string, CompetitionRow](
+		ttlcache.WithTTL[string, CompetitionRow](60 * time.Second),
+	)
 
 	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -350,30 +367,16 @@ type PlayerRow struct {
 
 // 参加者を取得する
 func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
+	if ok := playerCache.Has(id); ok {
+		item := playerCache.Get(id).Value()
+		return &item, nil
+	}
 	var p PlayerRow
 	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
 	}
+	playerCache.Set(id, p, ttlcache.DefaultTTL)
 	return &p, nil
-}
-
-func retrievePlayersByIDs(ctx context.Context, tenantDB dbOrTx, ids []string) ([]PlayerRow, error) {
-	if len(ids) == 0 {
-		return []PlayerRow{}, nil
-	}
-	query := "SELECT * FROM player WHERE id IN ("
-	for i := 0; i < len(ids); i++ {
-		if i != 0 {
-			query += ","
-		}
-		query += fmt.Sprintf("'%s'", ids[i])
-	}
-	query += ")"
-	var players []PlayerRow
-	if err := tenantDB.SelectContext(ctx, &players, query); err != nil {
-		return nil, fmt.Errorf("error Select player: %w", err)
-	}
-	return players, nil
 }
 
 // 参加者を認可する
@@ -403,30 +406,16 @@ type CompetitionRow struct {
 
 // 大会を取得する
 func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, id string) (*CompetitionRow, error) {
+	if ok := competitionCache.Has(id); ok {
+		item := competitionCache.Get(id).Value()
+		return &item, nil
+	}
 	var c CompetitionRow
 	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select competition: id=%s, %w", id, err)
 	}
+	competitionCache.Set(id, c, ttlcache.DefaultTTL)
 	return &c, nil
-}
-
-func retrieveCompetitionsByIds(ctx context.Context, tenantDB dbOrTx, ids []string) ([]CompetitionRow, error) {
-	if len(ids) == 0 {
-		return []CompetitionRow{}, nil
-	}
-	query := "SELECT * FROM competition WHERE id IN ("
-	for i := 0; i < len(ids); i++ {
-		if i != 0 {
-			query += ","
-		}
-		query += fmt.Sprintf("'%s'", ids[i])
-	}
-	query += ")"
-	var competitions []CompetitionRow
-	if err := tenantDB.SelectContext(ctx, &competitions, query); err != nil {
-		return nil, fmt.Errorf("error Select competition: %w", err)
-	}
-	return competitions, nil
 }
 
 type PlayerScoreRow struct {
@@ -559,17 +548,22 @@ type VisitHistoryRow struct {
 
 type VisitHistorySummaryRow struct {
 	PlayerID     string `db:"player_id"`
-	MinCreatedAt int64  `db:"min_created_at"`
+	CreatedAt int64  `db:"created_at"`
 }
 
 // 大会ごとの課金レポートを計算する
-func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID int64, competitonID string, comp *CompetitionRow) (*BillingReport, error) {
+func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID int64, competitonID string) (*BillingReport, error) {
+	comp, err := retrieveCompetition(ctx, tenantDB, competitonID)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
+	}
+
 	// ランキングにアクセスした参加者のIDを取得する
 	vhs := []VisitHistorySummaryRow{}
 	if err := adminDB.SelectContext(
 		ctx,
 		&vhs,
-		"SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id",
+		"SELECT player_id, created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ?",
 		tenantID,
 		comp.ID,
 	); err != nil && err != sql.ErrNoRows {
@@ -578,7 +572,7 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	billingMap := map[string]string{}
 	for _, vh := range vhs {
 		// competition.finished_atよりもあとの場合は、終了後に訪問したとみなして大会開催内アクセス済みとみなさない
-		if comp.FinishedAt.Valid && comp.FinishedAt.Int64 < vh.MinCreatedAt {
+		if comp.FinishedAt.Valid && comp.FinishedAt.Int64 < vh.CreatedAt {
 			continue
 		}
 		billingMap[vh.PlayerID] = "visitor"
@@ -627,26 +621,6 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
 		BillingYen:        100*playerCount + 10*visitorCount,
 	}, nil
-}
-
-// 大会ごとの課金レポートを渡された大会ID全てについて計算する
-func billingReportsByCompetitions(ctx context.Context, tenantDB dbOrTx, tenantID int64, competitionIDs []string) ([]BillingReport, error) {
-	if len(competitionIDs) == 0 {
-		return []BillingReport{}, nil
-	}
-	comps, err := retrieveCompetitionsByIds(ctx, tenantDB, competitionIDs)
-	if err != nil {
-		return nil, fmt.Errorf("error retrieveCompetitionsByIds: %w", err)
-	}
-	reports := make([]BillingReport, 0, len(comps))
-	for _, comp := range comps {
-		report, err := billingReportByCompetition(ctx, tenantDB, tenantID, comp.ID, &comp)
-		if err != nil {
-			return nil, fmt.Errorf("error billingReportByCompetition: %w", err)
-		}
-		reports = append(reports, *report)
-	}
-	return reports, nil
 }
 
 type TenantWithBilling struct {
@@ -726,15 +700,11 @@ func tenantsBillingHandler(c echo.Context) error {
 			); err != nil {
 				return fmt.Errorf("failed to Select competition: %w", err)
 			}
-			compIDs := make([]string, 0, len(cs))
-			for _, c := range cs {
-				compIDs = append(compIDs, c.ID)
-			}
-			reports, err := billingReportsByCompetitions(ctx, tenantDB, t.ID, compIDs)
-			if err != nil {
-				return fmt.Errorf("failed to billingReportsByCompetitions: %w", err)
-			}
-			for _, report := range reports {
+			for _, comp := range cs {
+				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
+				if err != nil {
+					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
+				}
 				tb.BillingYen += report.BillingYen
 			}
 			tenantBillings = append(tenantBillings, tb)
@@ -911,6 +881,7 @@ func playerDisqualifiedHandler(c echo.Context) error {
 			true, now, playerID, err,
 		)
 	}
+	playerCache.Delete(playerID)
 	p, err := retrievePlayer(ctx, tenantDB, playerID)
 	if err != nil {
 		// 存在しないプレイヤー
@@ -1028,6 +999,7 @@ func competitionFinishHandler(c echo.Context) error {
 			now, now, id, err,
 		)
 	}
+	competitionCache.Delete(id)
 	return c.JSON(http.StatusOK, SuccessResult{Status: true})
 }
 
@@ -1217,15 +1189,13 @@ func billingHandler(c echo.Context) error {
 		return fmt.Errorf("error Select competition: %w", err)
 	}
 	tbrs := make([]BillingReport, 0, len(cs))
-	compIDs := make([]string, 0, len(cs))
-	for _, c := range cs {
-		compIDs = append(compIDs, c.ID)
+	for _, comp := range cs {
+		report, err := billingReportByCompetition(ctx, tenantDB, v.tenantID, comp.ID)
+		if err != nil {
+			return fmt.Errorf("error billingReportByCompetition: %w", err)
+		}
+		tbrs = append(tbrs, *report)
 	}
-	reports, err := billingReportsByCompetitions(ctx, tenantDB, v.tenantID, compIDs)
-	if err != nil {
-		return fmt.Errorf("error billingReportsByCompetitions: %w", err)
-	}
-	tbrs = append(tbrs, reports...)
 
 	res := SuccessResult{
 		Status: true,
@@ -1401,16 +1371,15 @@ func competitionRankingHandler(c echo.Context) error {
 		return fmt.Errorf("error Select tenant: id=%d, %w", v.tenantID, err)
 	}
 
-	if _, err := adminDB.ExecContext(
-		ctx,
-		"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-		v.playerID, tenant.ID, competitionID, now, now,
-	); err != nil {
-		return fmt.Errorf(
-			"error Insert visit_history: playerID=%s, tenantID=%d, competitionID=%s, createdAt=%d, updatedAt=%d, %w",
-			v.playerID, tenant.ID, competitionID, now, now, err,
-		)
-	}
+	go func() {
+		if _, err := adminDB.ExecContext(
+			ctx,
+			"INSERT INTO visit_history (player_id, tenant_id, competition_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+			v.playerID, tenant.ID, competitionID, now, now,
+		); err != nil {
+			log.Printf("error Insert visit_history: playerID=%s, tenantID=%d, competitionID=%s, %s", v.playerID, tenant.ID, competitionID, err)
+		}
+	}()
 
 	var rankAfter int64
 	rankAfterStr := c.QueryParam("rank_after")
@@ -1431,7 +1400,7 @@ func competitionRankingHandler(c echo.Context) error {
 	if err := tenantDB.SelectContext(
 		ctx,
 		&pss,
-		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC",
+		"SELECT * FROM player_score WHERE tenant_id = ? AND competition_id = ? ORDER BY row_num DESC LIMIT 500",
 		tenant.ID,
 		competitionID,
 	); err != nil {
@@ -1439,8 +1408,6 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 	ranks := make([]CompetitionRank, 0, len(pss))
 	scoredPlayerSet := make(map[string]struct{}, len(pss))
-
-	playerIDs := make([]string, 0, len(pss))
 	for _, ps := range pss {
 		// player_scoreが同一player_id内ではrow_numの降順でソートされているので
 		// 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
@@ -1448,20 +1415,9 @@ func competitionRankingHandler(c echo.Context) error {
 			continue
 		}
 		scoredPlayerSet[ps.PlayerID] = struct{}{}
-		playerIDs = append(playerIDs, ps.PlayerID)
-	}
-	players, err := retrievePlayersByIDs(ctx, tenantDB, playerIDs)
-	if err != nil {
-		return fmt.Errorf("error retrievePlayersByIDs: %w", err)
-	}
-	playersMap := make(map[string]PlayerRow, len(players))
-	for _, p := range players {
-		playersMap[p.ID] = p
-	}
-	for _, ps := range pss {
-		p, ok := playersMap[ps.PlayerID]
-		if !ok {
-			return fmt.Errorf("player not found: %s", ps.PlayerID)
+		p, err := retrievePlayer(ctx, tenantDB, ps.PlayerID)
+		if err != nil {
+			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
 		ranks = append(ranks, CompetitionRank{
 			Score:             ps.Score,
