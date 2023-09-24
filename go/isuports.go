@@ -49,6 +49,8 @@ var (
 	adminDB *sqlx.DB
 
 	sqliteDriverName = "sqlite3"
+
+	playerCache map[string]*PlayerRow
 )
 
 // 環境変数を取得する、なければデフォルト値を返す
@@ -131,6 +133,8 @@ func Run() {
 		e.Logger.Panicf("error initializeSQLLogger: %s", err)
 	}
 	defer sqlLogger.Close()
+
+	playerCache = map[string]*PlayerRow{}
 
 	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -350,10 +354,14 @@ type PlayerRow struct {
 
 // 参加者を取得する
 func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
+	if p, ok := playerCache[id]; ok {
+		return p, nil
+	}
 	var p PlayerRow
 	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
 		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
 	}
+	playerCache[id] = &p
 	return &p, nil
 }
 
@@ -911,6 +919,7 @@ func playerDisqualifiedHandler(c echo.Context) error {
 			true, now, playerID, err,
 		)
 	}
+	playerCache[playerID] = nil
 	p, err := retrievePlayer(ctx, tenantDB, playerID)
 	if err != nil {
 		// 存在しないプレイヤー
