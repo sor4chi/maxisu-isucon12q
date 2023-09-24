@@ -76,5 +76,4 @@ mysql-conf-deploy-s3:
 
 .PHONY: app-deploy
 app-deploy:
-	cd ./go && make
 	sudo systemctl restart isuports.service
