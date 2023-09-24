@@ -792,6 +792,17 @@ func playersAddHandler(c echo.Context) error {
 	displayNames := params["display_name[]"]
 
 	pds := make([]PlayerDetail, 0, len(displayNames))
+
+	if len(displayNames) == 0 {
+		res := PlayersAddHandlerResult{
+			Players: pds,
+		}
+		return c.JSON(http.StatusOK, SuccessResult{Status: true, Data: res})
+	}
+
+	query := "INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at) VALUES"
+	args := []interface{}{}
+
 	for _, displayName := range displayNames {
 		id, err := dispenseID(ctx)
 		if err != nil {
@@ -799,25 +810,20 @@ func playersAddHandler(c echo.Context) error {
 		}
 
 		now := time.Now().Unix()
-		if _, err := tenantDB.ExecContext(
-			ctx,
-			"INSERT INTO player (id, tenant_id, display_name, is_disqualified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-			id, v.tenantID, displayName, false, now, now,
-		); err != nil {
-			return fmt.Errorf(
-				"error Insert player at tenantDB: id=%s, displayName=%s, isDisqualified=%t, createdAt=%d, updatedAt=%d, %w",
-				id, displayName, false, now, now, err,
-			)
-		}
-		p, err := retrievePlayer(ctx, tenantDB, id)
-		if err != nil {
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
+		query += " (?, ?, ?, ?, ?, ?),"
+		args = append(args, id, v.tenantID, displayName, false, now, now)
+
 		pds = append(pds, PlayerDetail{
-			ID:             p.ID,
-			DisplayName:    p.DisplayName,
-			IsDisqualified: p.IsDisqualified,
+			ID:             id,
+			DisplayName:    displayName,
+			IsDisqualified: false,
 		})
+	}
+
+	query = strings.TrimSuffix(query, ",")
+
+	if _, err := tenantDB.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("error Insert player at tenantDB")
 	}
 
 	res := PlayersAddHandlerResult{
